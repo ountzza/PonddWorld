@@ -1,0 +1,227 @@
+//
+//  TabloidWelcomePageVC.m
+//  WordPress
+//
+//  Created by Varut Aphimanchindakul on 11/22/54 BE.
+//  Copyright (c) 2554 WordPress. All rights reserved.
+//
+
+#import "TabloidWelcomePageVC.h"
+#import "NSURL+IDN.h"
+
+@implementation TabloidWelcomePageVC
+@synthesize blog;
+@synthesize password, username, url;
+
+- (id)initWithNibName:(NSString *)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil
+{
+    self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil];
+    if (self) {
+        // Custom initialization
+    }
+    return self;
+}
+
+- (void)didReceiveMemoryWarning
+{
+    // Releases the view if it doesn't have a superview.
+    [super didReceiveMemoryWarning];
+    
+    // Release any cached data, images, etc that aren't in use.
+}
+
+-(void)connectToTabloid
+{
+    NSLog(@"%s", __FUNCTION__);
+    self.url = [NSURL IDNEncodedHostname:@"http://172.30.155.140/wordpress/"];
+    NSLog(@"blog url: %@", self.url);
+    self.username = @"iTabloid";
+    self.password = @"varut5401";
+    
+    [self performSelectorInBackground:@selector(checkURL) withObject:nil];
+    
+}
+
+- (void)checkURL {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+	
+	NSString *urlToValidate = @"http://172.30.155.140/wordpress/";    
+	
+    if(![urlToValidate hasPrefix:@"http"])
+        urlToValidate = [NSString stringWithFormat:@"http://%@", url];
+	
+    urlToValidate = [urlToValidate stringByReplacingOccurrencesOfRegex:@"/wp-login.php$" withString:@""];
+    urlToValidate = [urlToValidate stringByReplacingOccurrencesOfRegex:@"/wp-admin/?$" withString:@""]; 
+    urlToValidate = [urlToValidate stringByReplacingOccurrencesOfRegex:@"/?$" withString:@""]; 
+	
+    [FileLogger log:@"%@ %@ %@", self, NSStringFromSelector(_cmd), urlToValidate];
+	ASIHTTPRequest *xmlrpcRequest = [[ASIHTTPRequest alloc] initWithURL:[NSURL URLWithString:urlToValidate]];
+	[xmlrpcRequest setValidatesSecureCertificate:NO]; 
+	[xmlrpcRequest setShouldPresentCredentialsBeforeChallenge:NO];
+	[xmlrpcRequest setShouldPresentAuthenticationDialog:YES];
+	[xmlrpcRequest setUseKeychainPersistence:YES];
+	[xmlrpcRequest setNumberOfTimesToRetryOnTimeout:2];
+	[xmlrpcRequest setDidFinishSelector:@selector(remoteValidate:)];
+	[xmlrpcRequest setDidFailSelector:@selector(checkURLWentWrong:)];
+	[xmlrpcRequest setDelegate:self];
+    WordPressAppDelegate *appDelegate = (WordPressAppDelegate *)[[UIApplication sharedApplication] delegate];
+	[xmlrpcRequest addRequestHeader:@"User-Agent" value:[appDelegate applicationUserAgent]];
+    [xmlrpcRequest addRequestHeader:@"Accept" value:@"*/*"];
+    [xmlrpcRequest startAsynchronous];
+	
+	[xmlrpcRequest release];
+  	[pool release];    
+}
+
+- (void)remoteValidate:(ASIHTTPRequest *)xmlrpcRequest
+{
+	NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+	WPDataController *dc = [[WPDataController alloc] init];
+    WPLog(@"before guess");
+    NSLog(@"%s self.url= %@",__FUNCTION__,self.url);
+    NSString *xmlrpc = [dc guessXMLRPCForUrl:self.url];
+    WPLog(@"after guess");
+    [subsites release]; subsites = nil;
+    NSLog(@"%s self.url= %@",__FUNCTION__,self.url);
+    if (xmlrpc != nil) {
+        subsites = [[dc getBlogsForUrl:xmlrpc username:self.username password:self.password] retain];
+        if (subsites != nil) {
+            [self performSelectorOnMainThread:@selector(validationSuccess:) withObject:xmlrpc waitUntilDone:YES];
+        } else {
+            [self performSelectorOnMainThread:@selector(validationDidFail:) withObject:dc.error waitUntilDone:YES];
+        }
+    } else {
+        [self performSelectorOnMainThread:@selector(validationDidFail:) withObject:dc.error waitUntilDone:YES];
+    }
+	
+	[dc release];
+	[pool release];  
+}
+
+- (void)checkURLWentWrong:(ASIHTTPRequest *)request {
+	NSError *error = [request error];
+	[FileLogger log:@"%@ %@ %@", self, NSStringFromSelector(_cmd), error];
+	[self performSelectorOnMainThread:@selector(validationDidFail:) withObject:error waitUntilDone:YES];
+}
+
+
+
+- (void)validationSuccess:(NSString *)xmlrpc {
+    blog.url = self.url;
+    blog.xmlrpc = xmlrpc;
+    blog.username = self.username;
+    NSLog(@"%s blog.url = %@",__FUNCTION__,self.url);
+	NSError *error = nil;
+	//check if the blog is a WP.COM blog
+	if(blog.isWPcom) {
+		[SFHFKeychainUtils storeUsername:blog.username
+                             andPassword:self.password
+                          forServiceName:@"WordPress.com"
+                          updateExisting:YES
+                                   error:&error];
+	} else {
+		[SFHFKeychainUtils storeUsername:self.username
+							 andPassword:self.password
+						  forServiceName:self.url
+						  updateExisting:YES
+								   error:&error];
+	}
+	
+    if (error) {
+		[FileLogger log:@"%@ %@ Error saving password for %@: %@", self, NSStringFromSelector(_cmd), blog.url, error];
+    } else {
+		[FileLogger log:@"%@ %@ %@", self, NSStringFromSelector(_cmd), blog.url];
+	}
+	if (DeviceIsPad())
+		[self dismissModalViewControllerAnimated:YES];
+	else
+		[self.navigationController popToRootViewControllerAnimated:YES];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BlogsRefreshNotification" object:nil];
+    
+	[self.navigationItem setHidesBackButton:NO animated:NO];
+}
+
+- (void)validationDidFail:(id)wrong {
+    if (wrong) {
+        if ([wrong isKindOfClass:[UITableViewCell class]]) {
+            ((UITableViewCell *)wrong).textLabel.textColor = WRONG_FIELD_COLOR;
+        } else if ([wrong isKindOfClass:[NSError class]]) {
+            NSError *error = (NSError *)wrong;
+			NSString *message;
+			if ([error code] == 403) {
+				message = NSLocalizedString(@"Please update your credentials and try again.", @"");
+			} else {
+				message = [error localizedDescription];
+			}
+            
+            UIAlertView *alertView = [[UIAlertView alloc] initWithTitle:NSLocalizedString(@"Sorry, can't log in", @"")
+																message:message
+                                                               delegate:self
+                                                      cancelButtonTitle:NSLocalizedString(@"Need Help?", @"")
+                                                      otherButtonTitles:NSLocalizedString(@"OK", @""), nil];
+            [alertView show];
+            [alertView release];            
+        }
+    }    
+    
+	[self.navigationItem setHidesBackButton:NO animated:NO];
+}
+
+#pragma mark -
+#pragma mark UIAlertViewDelegate
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex { 
+	switch(buttonIndex) {
+		case 0: {
+			HelpViewController *helpViewController = [[HelpViewController alloc] init];
+			WordPressAppDelegate *appDelegate = (WordPressAppDelegate *)[[UIApplication sharedApplication] delegate];
+			
+			if (DeviceIsPad()) {
+				helpViewController.isBlogSetup = YES;
+				[self.navigationController pushViewController:helpViewController animated:YES];
+			}
+			else
+				[appDelegate.navigationController presentModalViewController:helpViewController animated:YES];
+			
+			[helpViewController release];
+			break;
+		}
+		case 1:
+			//ok
+			break;
+		default:
+			break;
+	}
+}
+
+
+#pragma mark - View lifecycle
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    // Do any additional setup after loading the view from its nib.
+    if (blog) {
+        NSError *error = nil;
+        self.url = blog.url;
+        self.username = blog.username;
+        self.password = [SFHFKeychainUtils getPasswordForUsername:blog.username andServiceName:blog.hostURL error:&error];
+    }
+    [self connectToTabloid];
+
+}
+
+- (void)viewDidUnload
+{
+    [super viewDidUnload];
+    // Release any retained subviews of the main view.
+    // e.g. self.myOutlet = nil;
+}
+
+- (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation
+{
+    // Return YES for supported orientations
+	return YES;
+}
+
+@end
